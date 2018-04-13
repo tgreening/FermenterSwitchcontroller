@@ -13,29 +13,41 @@
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
+#include <time.h>
+#include <WiFiUdp.h>
+#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
+#include <FS.h>                   //this needs to be first, or it all crashes and burns...
+#include <ArduinoJson.h>          //https://github.com/bblanchon/ArduinoJson
 
 #define OLED_RESET 4
 Adafruit_SSD1306 display(OLED_RESET);
+#include <time.h>
 
 // WiFi parameters
-const char* ssid = "";
-const char* password = "";
 const int heatPin = D1;
 const int coolPin = D2;
 const int IR_PIN = D8;
-const String apiKey = "";
 const char* thingSpeakserver = "api.thingspeak.com";
 const long READ_MILLIS = 5000UL;
-const long POST_MILLIS = 300000UL;
+const long CHECK_MILLIS = 300000UL;
+const long POST_MILLIS = 1800000UL;
+const char* host = "fermenterswitch";
+int timezone = -5 * 3600;
+int dst = 1;
 
-float lastPostTime = 0;
 float tolerance = 1.0F;
 float desiredTemperature = 63.0;
 int mode = 0; //1 - heating, 2 - cooling
 HTTPClient http;
 unsigned long lastReadingTime = millis() + 60000UL;
+long unsigned lastCheckTime = millis() + CHECK_MILLIS;
+long unsigned lastPostTime = millis() + POST_MILLIS;
 float lastReading, chamberReading;
 float totalTemperatureChange = 0.0F;
+char apiKey[16];
+
+//flag for saving data
+bool shouldSaveConfig = false;
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(D4);
@@ -46,8 +58,22 @@ DallasTemperature chamberSensor(&oneWire2);
 
 ESP8266WebServer httpServer(80);
 
+//callback notifying us of the need to save config
+void saveConfigCallback () {
+  Serial.println("Should save config");
+  shouldSaveConfig = true;
+}
+
 void setup(void)
 {
+  pinMode(heatPin, OUTPUT);
+  pinMode(coolPin, OUTPUT);
+
+  //If you don't do this the 40A SSR goes high for some reason -- so turn everything off
+  turnOff();
+
+  WiFiManager wifiManager;
+  //wifiManager.resetSettings();
   httpServer.on("/", HTTP_GET, []() {
     yield();
     httpServer.sendHeader("Connection", "close");
@@ -73,7 +99,9 @@ void setup(void)
     if (mode == 2) {
       html += "Cooling<br>";
     }
-    html += "</body></html>";
+    html += "API Key: ";
+    html += String(apiKey);
+    html += "<br></body></html>";
     Serial.println("Done serving up HTML...");
     httpServer.send(200, "text/html", html);
   });
@@ -81,37 +109,102 @@ void setup(void)
     yield();
     float desired, tol;
     if (httpServer.arg("desired") != "") {
-      desired = httpServer.arg("desired").toFloat();
-    } else {
-      desired = desiredTemperature;
+      desiredTemperature = httpServer.arg("desired").toFloat();
     }
     if (httpServer.arg("tolerance") != "") {
-      tol = httpServer.arg("tolerance").toFloat();
-    } else {
-      tol = tolerance;
+      tolerance = httpServer.arg("tolerance").toFloat();
     }
     httpServer.sendHeader("Connection", "close");
     httpServer.sendHeader("Access - Control - Allow - Origin", "*");
-    updateFile(desired, tol);
+    updateSettingsFile(desiredTemperature, tolerance);
     httpServer.send(200, "text / plain", "OK");
+  });
+  httpServer.on("/log", HTTP_GET, []() {
+    yield();
+    httpServer.sendHeader("Connection", "close");
+    httpServer.sendHeader("Access-Control-Allow-Origin", "*");
+    httpServer.send(200, "text / plain", readRestartFile());
 
   });
-  pinMode(heatPin, OUTPUT);
-  pinMode(coolPin, OUTPUT);
   // Start Serial
   Serial.begin(115200);
   Wire.begin(D5, D6);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // initialize with the I2C addr 0x3D (for the 128x64)
   display.display();
 
-  // Connect to WiFi
-  WiFi.hostname("fermenterswitch");
-  WiFi.begin(ssid, password);
+  if (SPIFFS.begin()) {
+    Serial.println("mounted file system");
+    if (SPIFFS.exists("/config.json")) {
+      //file exists, reading and loading
+      Serial.println("reading config file");
+      File configFile = SPIFFS.open("/config.json", "r");
+      if (configFile) {
+        Serial.println("opened config file");
+        size_t size = configFile.size();
+        // Allocate a buffer to store contents of the file.
+        std::unique_ptr<char[]> buf(new char[size]);
+
+        configFile.readBytes(buf.get(), size);
+        DynamicJsonBuffer jsonBuffer;
+        JsonObject& json = jsonBuffer.parseObject(buf.get());
+        json.printTo(Serial);
+        if (json.success()) {
+          Serial.println("\nparsed json");
+          strcpy(apiKey, json["ThingSpeakWriteKey"]);
+        } else {
+          Serial.println("failed to load json config");
+        }
+      }
+    }
+  } else {
+    Serial.println("failed to mount FS");
+  }
+  WiFiManagerParameter custom_thingspeak_api_key("key", "API key", apiKey, 40);
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+  //add all your parameters here
+  wifiManager.addParameter(&custom_thingspeak_api_key);
+  WiFi.hostname(String(host));
+
+  if (!wifiManager.autoConnect(host)) {
+    Serial.println("failed to connect and hit timeout");
+    delay(3000);
+    //reset and try again, or maybe put it to deep sleep
+    ESP.reset();
+    delay(5000);
+  }
+
+  //if you get here you have connected to the WiFi
+  Serial.println("connected...yeey :)");
+  if (!MDNS.begin(host)) {
+    Serial.println("Error setting up MDNS responder!");
+  }
+
+  strcpy(apiKey, custom_thingspeak_api_key.getValue());
+
+  //save the custom parameters to FS
+  if (shouldSaveConfig) {
+    Serial.println("saving config");
+    DynamicJsonBuffer jsonBuffer;
+    JsonObject& json = jsonBuffer.createObject();
+    json["ThingSpeakWriteKey"] = apiKey;
+
+    File configFile = SPIFFS.open("/config.json", "w");
+    if (!configFile) {
+      Serial.println("failed to open config file for writing");
+    }
+
+    json.printTo(Serial);
+    json.printTo(configFile);
+    configFile.close();
+    //end save
+  }
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  ArduinoOTA.setHostname("FermenterSwitch");
+  ArduinoOTA.setHostname(host);
   ArduinoOTA.onStart([]() {
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH)
@@ -150,8 +243,15 @@ void setup(void)
   fermenterSensor.requestTemperatures(); // Send the command to get temperatures
   lastReading = getReading(fermenterSensor);
   SPIFFS.begin();
-  readFile();
+  readSettingsFile();
+  configTime(timezone, dst, "pool.ntp.org", "time.nist.gov");
+  Serial.println("\nWaiting for Internet time");
 
+  while (!time(nullptr)) {
+    Serial.print("*");
+    delay(1000);
+  }
+  Serial.println("\nTime response....OK");
 }
 
 void loop() {
@@ -167,22 +267,33 @@ void loop() {
     totalTemperatureChange += temperatureChange;
     lastReading = currentReading;
 
-    if ((long)(millis() - lastPostTime) >= 0) {
+    if ((long)(millis() - lastCheckTime) >= 0) {
       Serial.println("Updating checks...");
-      lastPostTime += POST_MILLIS;
+      lastCheckTime += CHECK_MILLIS;
       if (currentReading - desiredTemperature != 0.0F) {
+        float targetTemperature = 0.0F;
         Serial.println("We need to do something");
-        if (currentReading - desiredTemperature > tolerance) {
+        if (currentReading > desiredTemperature) {
           Serial.println("Too hot");
-          if (currentReading + (totalTemperatureChange * 2) > desiredTemperature + tolerance) {
+          if (mode == 2) {
+            targetTemperature = desiredTemperature;
+          } else {
+            targetTemperature = desiredTemperature + tolerance;
+          }
+          if (currentReading + (totalTemperatureChange * 2) > targetTemperature) {
             turnOnCooling();
           } else if (mode == 2) {
             Serial.println("Will get cool in 10 minutes");
             turnOff();
           }
-        } else if (desiredTemperature - currentReading > tolerance) {
+        } else if (desiredTemperature > currentReading ) {
+          if (mode == 1) {
+            targetTemperature = desiredTemperature;
+          } else {
+            targetTemperature = desiredTemperature - tolerance;
+          }
           Serial.println("Too cold");
-          if ((currentReading + (totalTemperatureChange * 2)) < desiredTemperature - tolerance) {
+          if ((currentReading + (totalTemperatureChange * 2)) < targetTemperature) {
             Serial.println("Should turn heat on");
             turnOnHeat();
           } else if (mode == 1) {
@@ -196,9 +307,6 @@ void loop() {
         Serial.println("In the range");
         turnOff();
       }
-      postThingSpeak(currentReading, chamberReading, desiredTemperature, totalTemperatureChange);
-      totalTemperatureChange = 0.0F;
-      yield();
     }
     display.setCursor(0, 0);
     display.clearDisplay();
@@ -224,6 +332,13 @@ void loop() {
     display.display();
     delay(100);
   }
+  if ((long)(millis() - lastPostTime) >= 0) {
+    lastPostTime += POST_MILLIS;
+    postReadingData(currentReading, chamberReading, desiredTemperature, totalTemperatureChange, tolerance);
+    totalTemperatureChange = 0.0F;
+    yield();
+  }
+
   httpServer.handleClient();
   ArduinoOTA.handle();
 }
@@ -265,35 +380,45 @@ void turnOff() {
   mode = 0;
 }
 
-void postThingSpeak(float fermenter, float chamber, int desired, float avgChange) {
+void postRestartData() {
+  postToThingSpeak(String(apiKey) + "&field6=0\r\n\r\n");
+}
+
+void postReadingData(float fermenter, float chamber, int desired, float avgChange, float tolerance) {
+  String postStr = apiKey;
+  postStr += "&field1=";
+  postStr += String(fermenter);
+  postStr += "&field2=";
+  postStr += String(chamber);
+  postStr += "&field3=";
+  postStr += String(desired);
+  postStr += "&field4=";
+  postStr += String(mode);
+  postStr += "&field5=";
+  postStr += String(avgChange);
+  postStr += "&field6=";
+  postStr += String(tolerance);
+  postStr += "\r\n\r\n";
+  postToThingSpeak(postStr);
+}
+
+void postToThingSpeak(String data) {
   WiFiClient client;
   if (client.connect(thingSpeakserver, 80)) { // "184.106.153.149" or api.thingspeak.com
-    String postStr = apiKey;
-    postStr += "&field1=";
-    postStr += String(fermenter);
-    postStr += "&field2=";
-    postStr += String(chamber);
-    postStr += "&field3=";
-    postStr += String(desired);
-    postStr += "&field4=";
-    postStr += String(mode);
-    postStr += "&field5=";
-    postStr += String(avgChange);
-    postStr += "\r\n\r\n";
 
     client.print("POST /update HTTP/1.1\n");
     client.print("Host: api.thingspeak.com\n");
     client.print("Connection: close\n");
-    client.print("X-THINGSPEAKAPIKEY: " + apiKey + "\n");
+    client.print("X-THINGSPEAKAPIKEY: " + String(apiKey) + "\n");
     client.print("Content-Type: application/x-www-form-urlencoded\n");
     client.print("Content-Length: ");
-    client.print(postStr.length());
+    client.print(data.length());
     client.print("\n\n");
-    client.print(postStr);
+    client.print(data);
   }
 }
 
-void readFile() {
+void readSettingsFile() {
   //  Serial.printf("read file heap size start: %u\n", ESP.getFreeHeap());
   File f = SPIFFS.open("settings.txt", "r");
   if (!f) {
@@ -320,7 +445,7 @@ void readFile() {
 
 }
 
-void updateFile(float desired, float tolerance) {
+void updateSettingsFile(float desired, float tolerance) {
   //  Serial.printf("update file settings heap size: %u\n", ESP.getFreeHeap());
   if (SPIFFS.exists("settings.txt")) {
     if (SPIFFS.exists("settings.old")) {
@@ -339,3 +464,43 @@ void updateFile(float desired, float tolerance) {
     yield();
   }
 }
+
+void writeRestartFile() {
+  time_t now = time(nullptr);
+  struct tm* p_tm = localtime(&now);
+
+  //  Serial.printf("update file settings heap size: %u\n", ESP.getFreeHeap());
+  File f = SPIFFS.open("restart.txt", "w");
+  if (!f) {
+    Serial.println("file open failed");
+  } else {
+    f.printf("%i/%i/%i %i:%i:%i\n", p_tm->tm_mon, p_tm->tm_mday, p_tm->tm_year, p_tm->tm_hour, p_tm->tm_min, p_tm->tm_sec);
+    f.close();
+    yield();
+  }
+}
+
+String readRestartFile() {
+  String retVal = "";
+  File f = SPIFFS.open("restart.txt", "r");
+  if (!f) {
+    Serial.println("file open failed");
+  }
+  else {
+    Serial.println("====== Reading from SPIFFS file =======");
+    bool stillReading = true;
+    while (stillReading) {
+      String s = f.readStringUntil('\n');
+      if (s != "") {
+        retVal += s;
+        retVal += "<br>";
+      } else {
+        Serial.println("Done Reading....");
+        stillReading = false;
+      }
+    }
+  }
+  f.close();
+  return retVal;
+}
+
