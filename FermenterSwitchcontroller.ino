@@ -18,7 +18,6 @@
 #include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
 #include <FS.h>                   //this needs to be first, or it all crashes and burns...
 #include <ArduinoJson.h>          //https://github.com/bblanchon/ArduinoJson
-
 #define OLED_RESET 4
 Adafruit_SSD1306 display(OLED_RESET);
 #include <time.h>
@@ -44,8 +43,9 @@ unsigned long lastReadingTime = millis() + 60000UL;
 long unsigned lastPostTime = millis() + POST_MILLIS;
 float lastReading, chamberReading;
 float temperatureChange = 0.0F;
-//float totalTemperatureChange = 0.0F;
 char apiKey[16];
+int HighMillis = 0;
+int Rollover = 0;
 
 //flag for saving data
 bool shouldSaveConfig = false;
@@ -102,8 +102,11 @@ void setup(void)
     }
     html += "API Key: ";
     html += String(apiKey);
+    html += "<br>Uptime: ";
+    html += uptimeString();
     html += "<br></body></html>";
-    Serial.println("Done serving up HTML...");
+    Serial.print("Done serving up HTML...");
+    Serial.println(html);
     httpServer.send(200, "text/html", html);
   });
   httpServer.on("/update", HTTP_GET, []() {
@@ -336,7 +339,7 @@ void loop() {
     postReadingData(currentReading, chamberReading, desiredTemperature, temperatureChange, tolerance);
     yield();
   }
-
+  uptime();
   httpServer.handleClient();
   ArduinoOTA.handle();
 }
@@ -506,6 +509,36 @@ String readRestartFile() {
     }
   }
   f.close();
+  return retVal;
+}
+
+void uptime() {
+  //** Making Note of an expected rollover *****//
+  if (millis() >= 3000000000) {
+    HighMillis = 1;
+
+  }
+  //** Making note of actual rollover **//
+  if (millis() <= 100000 && HighMillis == 1) {
+    Rollover++;
+    HighMillis = 0;
+  }
+}
+String uptimeString() {
+  long Day = 0;
+  int Hour = 0;
+  int Minute = 0;
+  int Second = 0;
+  long secsUp = millis() / 1000;
+  Second = secsUp % 60;
+  Minute = (secsUp / 60) % 60;
+  Hour = (secsUp / (60 * 60)) % 24;
+  Day = (Rollover * 50) + (secsUp / (60 * 60 * 24)); //First portion takes care of a rollover [around 50 days]
+  char buff[32];
+  sprintf(buff, "%3d Days %2d:%2d:%2d", Day, Hour, Minute, Second);
+  String retVal = String(buff);
+  Serial.print("Uptime String: ");
+  Serial.println(retVal);
   return retVal;
 }
 
