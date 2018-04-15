@@ -29,7 +29,7 @@ const int coolPin = D2;
 const int IR_PIN = D8;
 const char* thingSpeakserver = "api.thingspeak.com";
 const long READ_MILLIS = 5000UL;
-const long CHECK_MILLIS = 300000UL;
+const long WAIT_MILLIS = 300000UL;
 const long POST_MILLIS = 1800000UL;
 const char* host = "fermenterswitch";
 int timezone = -5 * 3600;
@@ -39,11 +39,12 @@ float tolerance = 1.0F;
 float desiredTemperature = 63.0;
 int mode = 0; //1 - heating, 2 - cooling
 HTTPClient http;
+unsigned long waitTime = millis() + WAIT_MILLIS;
 unsigned long lastReadingTime = millis() + 60000UL;
-long unsigned lastCheckTime = millis() + CHECK_MILLIS;
 long unsigned lastPostTime = millis() + POST_MILLIS;
 float lastReading, chamberReading;
-float totalTemperatureChange = 0.0F;
+float temperatureChange = 0.0F;
+//float totalTemperatureChange = 0.0F;
 char apiKey[16];
 
 //flag for saving data
@@ -87,8 +88,8 @@ void setup(void)
     html += desiredTemperature;
     html += "<br>Tolerance: ";
     html += tolerance;
-    html += "<br>Total Temperature Change: ";
-    html += totalTemperatureChange;
+    html += "<br>Temperature Change: ";
+    html += temperatureChange;
     html += "<br>Mode: ";
     if (mode == 0) {
       html += "Off<br>";
@@ -252,6 +253,7 @@ void setup(void)
     delay(1000);
   }
   Serial.println("\nTime response....OK");
+  turnOff();
 }
 
 void loop() {
@@ -263,50 +265,47 @@ void loop() {
     chamberSensor.requestTemperatures(); // Send the command to get temperatures
     currentReading = getReading(fermenterSensor);
     chamberReading = getReading(chamberSensor);
-    float temperatureChange = currentReading - lastReading;
-    totalTemperatureChange += temperatureChange;
+    temperatureChange = currentReading - lastReading;
     lastReading = currentReading;
 
-    if ((long)(millis() - lastCheckTime) >= 0) {
-      Serial.println("Updating checks...");
-      lastCheckTime += CHECK_MILLIS;
-      if (currentReading - desiredTemperature != 0.0F) {
-        float targetTemperature = 0.0F;
-        Serial.println("We need to do something");
-        if (currentReading > desiredTemperature) {
-          Serial.println("Too hot");
-          if (mode == 2) {
-            targetTemperature = desiredTemperature;
-          } else {
-            targetTemperature = desiredTemperature + tolerance;
-          }
-          if (currentReading + (totalTemperatureChange * 2) > targetTemperature) {
-            turnOnCooling();
-          } else if (mode == 2) {
-            Serial.println("Will get cool in 10 minutes");
-            turnOff();
-          }
-        } else if (desiredTemperature > currentReading ) {
-          if (mode == 1) {
-            targetTemperature = desiredTemperature;
-          } else {
-            targetTemperature = desiredTemperature - tolerance;
-          }
-          Serial.println("Too cold");
-          if ((currentReading + (totalTemperatureChange * 2)) < targetTemperature) {
-            Serial.println("Should turn heat on");
-            turnOnHeat();
-          } else if (mode == 1) {
-            Serial.println("Will get hot in 10 minutes");
-            turnOff();
-          }
+    if (currentReading - desiredTemperature != 0.0F && millis() - waitTime > 0) {
+      float targetTemperature = 0.0F;
+      Serial.println("We need to do something");
+      if (currentReading > desiredTemperature) {
+        Serial.println("Too hot");
+        if (mode == 2) {
+          targetTemperature = desiredTemperature;
         } else {
+          targetTemperature = desiredTemperature + tolerance;
+        }
+        if (currentReading + (temperatureChange * 3) > targetTemperature) {
+          turnOnCooling();
+        } else if (mode == 2) {
+          Serial.println("Will get cool in 10 minutes");
           turnOff();
+          waitTime = millis() + WAIT_MILLIS;
+        }
+      } else if (desiredTemperature > currentReading ) {
+        if (mode == 1) {
+          targetTemperature = desiredTemperature;
+        } else {
+          targetTemperature = desiredTemperature - tolerance;
+        }
+        Serial.println("Too cold");
+        if ((currentReading + (temperatureChange * 3)) < targetTemperature) {
+          Serial.println("Should turn heat on");
+          turnOnHeat();
+        } else if (mode == 1) {
+          Serial.println("Will get hot in 10 minutes");
+          turnOff();
+          waitTime = millis() + WAIT_MILLIS;
         }
       } else {
-        Serial.println("In the range");
         turnOff();
       }
+    } else {
+      Serial.println("In the range");
+      turnOff();
     }
     display.setCursor(0, 0);
     display.clearDisplay();
@@ -334,8 +333,7 @@ void loop() {
   }
   if ((long)(millis() - lastPostTime) >= 0) {
     lastPostTime += POST_MILLIS;
-    postReadingData(currentReading, chamberReading, desiredTemperature, totalTemperatureChange, tolerance);
-    totalTemperatureChange = 0.0F;
+    postReadingData(currentReading, chamberReading, desiredTemperature, temperatureChange, tolerance);
     yield();
   }
 
@@ -345,18 +343,25 @@ void loop() {
 
 float getReading(DallasTemperature sensor) {
   int retryCount = 0;
-  float celsius = sensor.getTempCByIndex(0);
-  while ((celsius == 85 || celsius == -85) && retryCount < 10) {
-    celsius = sensor.getTempCByIndex(0);
+  float firstReading = sensor.getTempCByIndex(0);
+  //always good to wait between readings
+  delay(500);
+  //Get second reading to ensure that we don't have an anomaly
+  float secondReading = sensor.getTempCByIndex(0);
+  //If the two readings are more than a degree celsius different - retake both
+  while (((firstReading - secondReading) > 1.0F || (secondReading - firstReading) > 1.0F) && retryCount < 10) {
+    firstReading = sensor.getTempCByIndex(0);
     retryCount++;
     if (retryCount != 10) {
       delay(retryCount * 1000);
     }
+    secondReading = sensor.getTempCByIndex(0);
   }
+  //If after ten tries we're still off - restart
   if (retryCount == 10) {
     ESP.restart();
   }
-  return (celsius * 9 / 5) + 32;
+  return (firstReading * 9 / 5) + 32;
 }
 
 void turnOnHeat() {
