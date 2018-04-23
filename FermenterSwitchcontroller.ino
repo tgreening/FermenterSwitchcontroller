@@ -346,25 +346,25 @@ void loop() {
 
 float getReading(DallasTemperature sensor) {
   int retryCount = 0;
-  float firstReading = sensor.getTempCByIndex(0);
+  float firstReading = sensor.getTempFByIndex(0);
   //always good to wait between readings
   delay(500);
   //Get second reading to ensure that we don't have an anomaly
-  float secondReading = sensor.getTempCByIndex(0);
+  float secondReading = sensor.getTempFByIndex(0);
   //If the two readings are more than a degree celsius different - retake both
-  while (((firstReading - secondReading) > 1.0F || (secondReading - firstReading) > 1.0F) && retryCount < 10) {
-    firstReading = sensor.getTempCByIndex(0);
+  while (((firstReading - secondReading) > 1.0F || (secondReading - firstReading) > 1.0F) && ((int)firstReading * 100) != 199 && retryCount < 10) {
+    firstReading = sensor.getTempFByIndex(0);
     retryCount++;
     if (retryCount != 10) {
       delay(retryCount * 1000);
     }
-    secondReading = sensor.getTempCByIndex(0);
+    secondReading = sensor.getTempFByIndex(0);
   }
   //If after ten tries we're still off - restart
   if (retryCount == 10) {
     ESP.restart();
   }
-  return (firstReading * 9 / 5) + 32;
+  return secondReading;
 }
 
 void turnOnHeat() {
