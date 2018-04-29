@@ -84,10 +84,6 @@ void setup(void)
     html += lastReading;
     html += "<br>Chamber temperature: ";
     html += chamberReading;
-    html += "<br>Desired temperature: ";
-    html += desiredTemperature;
-    html += "<br>Tolerance: ";
-    html += tolerance;
     html += "<br>Temperature Change: ";
     html += temperatureChange;
     html += "<br>Mode: ";
@@ -100,10 +96,11 @@ void setup(void)
     if (mode == 2) {
       html += "Cooling<br>";
     }
-    html += "API Key: ";
-    html += String(apiKey);
     html += "<br>Uptime: ";
     html += uptimeString();
+    html += "<br><h1>Update</h1><br><form method=\"GET\" action=\"/update\">Desired temperature:<input name=\"desired\" type=\"text\" maxlength=\"5\" size=\"5\" value=\"" + String(desiredTemperature) + "\" />";
+    html += "<br>Tolerance: <input name=\"tolerance\" type=\"text\" maxlength=\"5\" size=\"5\" value=\"" + String(tolerance) + "\" />";
+    html += "<br><INPUT type=\"submit\" value=\"Send\"> <INPUT type=\"reset\"></form>";
     html += "<br></body></html>";
     Serial.print("Done serving up HTML...");
     Serial.println(html);
@@ -122,13 +119,6 @@ void setup(void)
     httpServer.sendHeader("Access - Control - Allow - Origin", "*");
     updateSettingsFile(desiredTemperature, tolerance);
     httpServer.send(200, "text / plain", "OK");
-  });
-  httpServer.on("/log", HTTP_GET, []() {
-    yield();
-    httpServer.sendHeader("Connection", "close");
-    httpServer.sendHeader("Access-Control-Allow-Origin", "*");
-    httpServer.send(200, "text / plain", readRestartFile());
-
   });
   // Start Serial
   Serial.begin(115200);
@@ -352,7 +342,7 @@ float getReading(DallasTemperature sensor) {
   //Get second reading to ensure that we don't have an anomaly
   float secondReading = sensor.getTempFByIndex(0);
   //If the two readings are more than a degree celsius different - retake both
-  while (((firstReading - secondReading) > 1.0F || (secondReading - firstReading) > 1.0F) && ((int)firstReading * 100) != 199 && retryCount < 10) {
+  while (((firstReading - secondReading) > 1.0F || (secondReading - firstReading) > 1.0F) && ((int)firstReading * 100)  < 200 && retryCount < 10) {
     firstReading = sensor.getTempFByIndex(0);
     retryCount++;
     if (retryCount != 10) {
@@ -393,6 +383,9 @@ void postRestartData() {
 }
 
 void postReadingData(float fermenter, float chamber, int desired, float avgChange, float tolerance) {
+  if (fermenter < 2.0F) {
+    fermenter = getReading(fermenterSensor);
+  }
   String postStr = apiKey;
   postStr += "&field1=";
   postStr += String(fermenter);
@@ -535,7 +528,7 @@ String uptimeString() {
   Hour = (secsUp / (60 * 60)) % 24;
   Day = (Rollover * 50) + (secsUp / (60 * 60 * 24)); //First portion takes care of a rollover [around 50 days]
   char buff[32];
-  sprintf(buff, "%3d Days %2d:%2d:%2d", Day, Hour, Minute, Second);
+  sprintf(buff, "%3d Days %02d:%02d:%02d", Day, Hour, Minute, Second);
   String retVal = String(buff);
   Serial.print("Uptime String: ");
   Serial.println(retVal);
