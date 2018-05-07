@@ -29,18 +29,20 @@ const int IR_PIN = D8;
 const char* thingSpeakserver = "api.thingspeak.com";
 const long READ_MILLIS = 5000UL;
 const long WAIT_MILLIS = 300000UL;
-const long POST_MILLIS = 1800000UL;
+const long POST_MILLIS = 120000UL;
+const long NEXT_CHECK = 120000UL;
 const char* host = "fermenterswitch";
-int timezone = -5 * 3600;
-int dst = 1;
+const int COOLING = 2;
+const int HEATING = 1;
+const int OFF = 0;
 
 float tolerance = 1.0F;
 float desiredTemperature = 63.0;
 int mode = 0; //1 - heating, 2 - cooling
 HTTPClient http;
-unsigned long waitTime = millis() + WAIT_MILLIS;
-unsigned long lastReadingTime = millis() + 60000UL;
-long unsigned lastPostTime = millis() + POST_MILLIS;
+unsigned long lastReadingTime = ((long)millis()) + 60000UL;
+long unsigned lastPostTime = ((long)millis()) + POST_MILLIS;
+unsigned long nextCheck = (long)millis() + 120000UL;
 float lastReading, chamberReading;
 float temperatureChange = 0.0F;
 char apiKey[16];
@@ -87,17 +89,19 @@ void setup(void)
     html += "<br>Temperature Change: ";
     html += temperatureChange;
     html += "<br>Mode: ";
-    if (mode == 0) {
+    if (mode == OFF) {
       html += "Off<br>";
     }
-    if (mode == 1) {
+    if (mode == HEATING) {
       html += "Heating<br>";
     }
-    if (mode == 2) {
+    if (mode == COOLING) {
       html += "Cooling<br>";
     }
     html += "<br>Uptime: ";
     html += uptimeString();
+    html += "<br>NextCheck: ";
+    html += (long)millis() > nextCheck;
     html += "<br><h1>Update</h1><br><form method=\"GET\" action=\"/update\">Desired temperature:<input name=\"desired\" type=\"text\" maxlength=\"5\" size=\"5\" value=\"" + String(desiredTemperature) + "\" />";
     html += "<br>Tolerance: <input name=\"tolerance\" type=\"text\" maxlength=\"5\" size=\"5\" value=\"" + String(tolerance) + "\" />";
     html += "<br><INPUT type=\"submit\" value=\"Send\"> <INPUT type=\"reset\"></form>";
@@ -238,14 +242,6 @@ void setup(void)
   lastReading = getReading(fermenterSensor);
   SPIFFS.begin();
   readSettingsFile();
-  configTime(timezone, dst, "pool.ntp.org", "time.nist.gov");
-  Serial.println("\nWaiting for Internet time");
-
-  while (!time(nullptr)) {
-    Serial.print("*");
-    delay(1000);
-  }
-  Serial.println("\nTime response....OK");
   turnOff();
 }
 
@@ -258,48 +254,33 @@ void loop() {
     chamberSensor.requestTemperatures(); // Send the command to get temperatures
     currentReading = getReading(fermenterSensor);
     chamberReading = getReading(chamberSensor);
-    temperatureChange = currentReading - lastReading;
-    lastReading = currentReading;
-
-    if (currentReading - desiredTemperature != 0.0F && millis() - waitTime > 0) {
-      float targetTemperature = 0.0F;
-      Serial.println("We need to do something");
-      if (currentReading > desiredTemperature) {
-        Serial.println("Too hot");
-        if (mode == 2) {
-          targetTemperature = desiredTemperature;
-        } else {
-          targetTemperature = desiredTemperature + tolerance;
-        }
-        if (currentReading + (temperatureChange * 3) > targetTemperature) {
+    if ((long)millis() > nextCheck) {
+      nextCheck += NEXT_CHECK;
+      temperatureChange = currentReading - lastReading;
+      lastReading = currentReading;
+      if (mode == OFF) {
+        if (currentReading  > desiredTemperature + tolerance) {
           turnOnCooling();
-        } else if (mode == 2) {
-          Serial.println("Will get cool in 10 minutes");
-          turnOff();
-          waitTime = millis() + WAIT_MILLIS;
-        }
-      } else if (desiredTemperature > currentReading ) {
-        if (mode == 1) {
-          targetTemperature = desiredTemperature;
-        } else {
-          targetTemperature = desiredTemperature - tolerance;
-        }
-        Serial.println("Too cold");
-        if ((currentReading + (temperatureChange * 3)) < targetTemperature) {
-          Serial.println("Should turn heat on");
+        } else if ( desiredTemperature >  currentReading + tolerance ) {
           turnOnHeat();
-        } else if (mode == 1) {
-          Serial.println("Will get hot in 10 minutes");
-          turnOff();
-          waitTime = millis() + WAIT_MILLIS;
         }
       } else {
-        turnOff();
+        Serial.println("Already doing something check on status");
+        if (currentReading > desiredTemperature) {
+          Serial.println("Too hot");
+          if ((currentReading + (temperatureChange * 4)) < desiredTemperature) {
+            Serial.println("Will get cool in a few minutes");
+            turnOff();
+          }
+        } else if (desiredTemperature > currentReading ) {
+          Serial.println("Too cold");
+          if ((currentReading + (temperatureChange * 4)) > desiredTemperature) {
+            Serial.println("Will get hot in a few minutes");
+            turnOff();
+          }
+        }
       }
-    } else {
-      Serial.println("In the range");
-      turnOff();
-    }
+    } 
     display.setCursor(0, 0);
     display.clearDisplay();
     display.print("F: ");
@@ -312,7 +293,7 @@ void loop() {
     display.println(desiredTemperature);
     display.setCursor(0, 45);
     display.print("Mode: ");
-    if (mode == 0) {
+    if (mode == OFF) {
       display.println("Off");
     }
     if (mode == 1) {
@@ -361,21 +342,22 @@ void turnOnHeat() {
   Serial.println("Turning heat on....");
   digitalWrite(coolPin, LOW);
   digitalWrite(heatPin, HIGH);
-  mode = 1;
+  mode = HEATING;
 }
 
 void turnOnCooling() {
   Serial.println("Turning cooling on....");
   digitalWrite(coolPin, HIGH);
   digitalWrite(heatPin, LOW);
-  mode = 2;
+  mode = COOLING;
 }
 
 void turnOff() {
   Serial.println("Turning everything off....");
   digitalWrite(coolPin, LOW);
   digitalWrite(heatPin, LOW);
-  mode = 0;
+  mode = OFF;
+  nextCheck = millis() + WAIT_MILLIS;
 }
 
 void postRestartData() {
