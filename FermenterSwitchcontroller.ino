@@ -48,6 +48,8 @@ float temperatureChange = 0.0F;
 char apiKey[16];
 int HighMillis = 0;
 int Rollover = 0;
+bool isHeatEnabled = true;
+bool isCoolEnabled = true;
 
 //flag for saving data
 bool shouldSaveConfig = false;
@@ -100,10 +102,26 @@ void setup(void)
     }
     html += "<br>Uptime: ";
     html += uptimeString();
-    html += "<br>NextCheck: ";
-    html += (long)millis() > nextCheck;
     html += "<br><h1>Update</h1><br><form method=\"GET\" action=\"/update\">Desired temperature:<input name=\"desired\" type=\"text\" maxlength=\"5\" size=\"5\" value=\"" + String(desiredTemperature) + "\" />";
     html += "<br>Tolerance: <input name=\"tolerance\" type=\"text\" maxlength=\"5\" size=\"5\" value=\"" + String(tolerance) + "\" />";
+    html += "<br>Cooling: <input name=\"cooling\" type=\"radio\" value=\"1\" ";
+    if (isCoolEnabled) {
+      html += " checked";
+    }
+    html += ">On<input name=\"cooling\" type=\"radio\" value=\"0\" ";
+    if (!isCoolEnabled) {
+      html += " checked";
+    }
+    html += ">Off<br>";
+    html += "<br>Heating: <input name=\"heating\" type=\"radio\" value=\"1\" ";
+    if (isHeatEnabled) {
+      html += " checked";
+    }
+    html += ">On<input name=\"heating\" type=\"radio\" value=\"0\" ";
+    if (!isHeatEnabled) {
+      html += " checked";
+    }
+    html += ">Off<br>";
     html += "<br><INPUT type=\"submit\" value=\"Send\"> <INPUT type=\"reset\"></form>";
     html += "<br></body></html>";
     Serial.print("Done serving up HTML...");
@@ -119,9 +137,16 @@ void setup(void)
     if (httpServer.arg("tolerance") != "") {
       tolerance = httpServer.arg("tolerance").toFloat();
     }
+    if (httpServer.arg("cooling") != "") {
+      isCoolEnabled = httpServer.arg("cooling").toInt();
+    }
+    if (httpServer.arg("heating") != "") {
+      isHeatEnabled = httpServer.arg("heating").toInt();
+    }
+
     httpServer.sendHeader("Connection", "close");
     httpServer.sendHeader("Access - Control - Allow - Origin", "*");
-    updateSettingsFile(desiredTemperature, tolerance);
+    writeSettingsFile();
     httpServer.send(200, "text / plain", "OK");
   });
   // Start Serial
@@ -164,7 +189,8 @@ void setup(void)
   wifiManager.addParameter(&custom_thingspeak_api_key);
   WiFi.hostname(String(host));
 
-  if (!wifiManager.autoConnect(host)) {
+  wifiManager.setConfigPortalTimeout(90);
+  if (!wifiManager.startConfigPortal(host)) {
     Serial.println("failed to connect and hit timeout");
     delay(3000);
     //reset and try again, or maybe put it to deep sleep
@@ -259,28 +285,35 @@ void loop() {
       temperatureChange = currentReading - lastReading;
       lastReading = currentReading;
       if (mode == OFF) {
-        if (currentReading  > desiredTemperature + tolerance) {
+        if (currentReading  > desiredTemperature + tolerance && isCoolEnabled) {
           turnOnCooling();
-        } else if ( desiredTemperature >  currentReading + tolerance ) {
+        } else if ( desiredTemperature >  currentReading + tolerance && isHeatEnabled) {
           turnOnHeat();
         }
       } else {
         Serial.println("Already doing something check on status");
-        if (currentReading > desiredTemperature) {
+        int multiplier = 1;
+        if (mode == COOLING) {
           Serial.println("Too hot");
-          if ((currentReading + (temperatureChange * 4)) < desiredTemperature) {
+          if ( currentReading > chamberReading) {
+            multiplier += (currentReading - chamberReading) / 3;
+          }
+          if ((currentReading + (temperatureChange * multiplier)) < desiredTemperature || currentReading < desiredTemperature || !isCoolEnabled) {
             Serial.println("Will get cool in a few minutes");
             turnOff();
           }
-        } else if (desiredTemperature > currentReading ) {
+        } else if (mode == HEATING ) {
           Serial.println("Too cold");
-          if ((currentReading + (temperatureChange * 4)) > desiredTemperature) {
+          if (chamberReading > currentReading) {
+            multiplier += (chamberReading - currentReading) / 3;
+          }
+          if ((currentReading + (temperatureChange * multiplier)) > desiredTemperature || currentReading > desiredTemperature || !isHeatEnabled) {
             Serial.println("Will get hot in a few minutes");
             turnOff();
           }
         }
       }
-    } 
+    }
     display.setCursor(0, 0);
     display.clearDisplay();
     display.print("F: ");
@@ -403,23 +436,44 @@ void postToThingSpeak(String data) {
 
 void readSettingsFile() {
   //  Serial.printf("read file heap size start: %u\n", ESP.getFreeHeap());
-  File f = SPIFFS.open("settings.txt", "r");
+  File f = SPIFFS.open("/settings.json", "r");
   if (!f) {
     Serial.println("file open failed");
+    writeSettingsFile();
   }
   else {
     Serial.println("====== Reading from SPIFFS file =======");
-    bool stillReading = true;
-    while (stillReading) {
-      String s = f.readStringUntil('\n');
-      if (s != "") {
-        Serial.println(s);
-        int commaIndex = s.indexOf(',');
-        desiredTemperature = s.substring(0, commaIndex).toFloat();
-        tolerance = s.substring(commaIndex + 1).toFloat();
-      } else {
-        Serial.println("Done Reading....");
-        stillReading = false;
+    if (SPIFFS.exists("/settings.json")) {
+      //file exists, reading and loading
+      Serial.println("reading settings file");
+      File settingsFile = SPIFFS.open("/settings.json", "r");
+      if (settingsFile) {
+        Serial.println("opened settings file");
+        size_t size = settingsFile.size();
+        // Allocate a buffer to store contents of the file.
+        std::unique_ptr<char[]> buf(new char[size]);
+
+        settingsFile.readBytes(buf.get(), size);
+        DynamicJsonBuffer jsonBuffer;
+        JsonObject& json = jsonBuffer.parseObject(buf.get());
+        json.printTo(Serial);
+        if (json.success()) {
+          Serial.println("\nparsed json");
+          if (json.containsKey("desiredTemperature")) {
+            desiredTemperature = json["desiredTemperature"];
+          }
+          if (json.containsKey("tolerance")) {
+            tolerance = json["tolerance"];
+          }
+          if (json.containsKey("coolingEnabled")) {
+            isCoolEnabled = json["coolingEnabled"];
+          }
+          if (json.containsKey("heatingEnabled")) {
+            isHeatEnabled = json["heatingEnabled"];
+          }
+        } else {
+          Serial.println("failed to load json config");
+        }
       }
     }
   }
@@ -428,42 +482,38 @@ void readSettingsFile() {
 
 }
 
-void updateSettingsFile(float desired, float tolerance) {
+void writeSettingsFile() {
   //  Serial.printf("update file settings heap size: %u\n", ESP.getFreeHeap());
-  if (SPIFFS.exists("settings.txt")) {
-    if (SPIFFS.exists("settings.old")) {
-      SPIFFS.remove("settings.old");
+  if (SPIFFS.exists("/settings.json")) {
+    if (SPIFFS.exists("/settings.old")) {
+      SPIFFS.remove("/settings.old");
     }
-    SPIFFS.rename("settings.txt", "settings.old");
-    SPIFFS.remove("settings.txt");
+    SPIFFS.rename("/settings.json", "/settings.old");
+    SPIFFS.remove("/settings.json");
   }
-  File f = SPIFFS.open("settings.txt", "w");
-  if (!f) {
-    Serial.println("file open failed");
-  } else {
-    f.printf("%f,%f\n", desired, tolerance);
-    Serial.printf("Wrote: %f,%f\n", desired, tolerance);
-    f.close();
-    yield();
+
+  DynamicJsonBuffer jsonBuffer;
+  JsonObject& json = jsonBuffer.createObject();
+  json["desiredTemperature"] = desiredTemperature;
+  json["tolerance"] = tolerance;
+  json["coolingEnabled"] = isCoolEnabled;
+  json["heatingEnabled"] = isHeatEnabled;
+
+  File configFile = SPIFFS.open("/settings.json", "w");
+  if (!configFile) {
+    Serial.println("failed to open config file for writing");
   }
+
+  json.printTo(Serial);
+  json.printTo(configFile);
+  configFile.close();
+  //end save
+  yield();
+
 }
 
-void writeRestartFile() {
-  time_t now = time(nullptr);
-  struct tm* p_tm = localtime(&now);
-
-  //  Serial.printf("update file settings heap size: %u\n", ESP.getFreeHeap());
-  File f = SPIFFS.open("restart.txt", "w");
-  if (!f) {
-    Serial.println("file open failed");
-  } else {
-    f.printf("%i/%i/%i %i:%i:%i\n", p_tm->tm_mon, p_tm->tm_mday, p_tm->tm_year, p_tm->tm_hour, p_tm->tm_min, p_tm->tm_sec);
-    f.close();
-    yield();
-  }
-}
-
-String readRestartFile() {
+/*
+  String readRestartFile() {
   String retVal = "";
   File f = SPIFFS.open("restart.txt", "r");
   if (!f) {
@@ -485,7 +535,7 @@ String readRestartFile() {
   }
   f.close();
   return retVal;
-}
+  }*/
 
 void uptime() {
   //** Making Note of an expected rollover *****//
