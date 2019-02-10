@@ -21,6 +21,7 @@
 #define OLED_RESET 4
 Adafruit_SSD1306 display(OLED_RESET);
 #include <time.h>
+#include "ThingSpeak.h"
 
 // WiFi parameters
 const int heatPin = D1;
@@ -29,9 +30,9 @@ const int IR_PIN = D8;
 const char* thingSpeakserver = "api.thingspeak.com";
 const long READ_MILLIS = 5000UL;
 const long WAIT_MILLIS = 300000UL;
-const long POST_MILLIS = 120000UL;
-const long NEXT_CHECK = 120000UL;
-const char* host = "fermenterswitch";
+long POST_MILLIS = 300000UL;
+long NEXT_CHECK = 120000UL;
+const char* host = "fermenterswitch_test";
 const int COOLING = 2;
 const int HEATING = 1;
 const int OFF = 0;
@@ -45,7 +46,7 @@ long unsigned lastPostTime = ((long)millis()) + POST_MILLIS;
 unsigned long nextCheck = (long)millis() + 120000UL;
 float lastReading, chamberReading;
 float temperatureChange = 0.0F;
-char apiKey[16];
+char apiKey[16], postMinutes[3], checkMinutes[3],tsChannel[6];
 int HighMillis = 0;
 int Rollover = 0;
 bool isHeatEnabled = true;
@@ -173,7 +174,12 @@ void setup(void)
         json.printTo(Serial);
         if (json.success()) {
           Serial.println("\nparsed json");
+          if (json["thinkSpeakChannel"])
+            strcpy(tsChannel, json["ThingSpeakChannel"]);
           strcpy(apiKey, json["ThingSpeakWriteKey"]);
+          strcpy(postMinutes, json["ThingSpeakPostMinutes"]);
+
+          strcpy(checkMinutes, json["NextCheckMinutes"]);
         } else {
           Serial.println("failed to load json config");
         }
@@ -183,10 +189,16 @@ void setup(void)
     Serial.println("failed to mount FS");
   }
   WiFiManagerParameter custom_thingspeak_api_key("key", "API key", apiKey, 40);
+  WiFiManagerParameter custom_thingspeak_post_minutes("Post Minutes", "Minutes between Thingsspeak posts", postMinutes, 5);
+  WiFiManagerParameter custom_check_minutes("Check Minutes", "Check Minutes", checkMinutes, 5);
+  WiFiManagerParameter custom_thingspeak_channel("ThingSpeak Channle", "Channel Number", tsChannel, 8);
   wifiManager.setSaveConfigCallback(saveConfigCallback);
 
   //add all your parameters here
   wifiManager.addParameter(&custom_thingspeak_api_key);
+  wifiManager.addParameter(&custom_thingspeak_channel);
+  wifiManager.addParameter(&custom_thingspeak_post_minutes);
+  wifiManager.addParameter(&custom_check_minutes);
   WiFi.hostname(String(host));
 
   wifiManager.setConfigPortalTimeout(90);
@@ -205,13 +217,26 @@ void setup(void)
   }
 
   strcpy(apiKey, custom_thingspeak_api_key.getValue());
-
+  strcpy(tsChannel, custom_thingspeak_channel.getValue());
+  int  i = atoi(custom_thingspeak_post_minutes.getValue());
+  if (i > 0) {
+    POST_MILLIS = (unsigned long)(60000 * i);
+  }
+  i = atoi(custom_check_minutes.getValue());
+  if (i > 0) {
+    NEXT_CHECK = (unsigned long)(60000 * i);
+  }
+  Serial.println(POST_MILLIS);
+  Serial.println(NEXT_CHECK);
   //save the custom parameters to FS
   if (shouldSaveConfig) {
     Serial.println("saving config");
     DynamicJsonBuffer jsonBuffer;
     JsonObject& json = jsonBuffer.createObject();
+    json["ThingSpeakChannel"] = tsChannel;
     json["ThingSpeakWriteKey"] = apiKey;
+    json["ThingSpeakPostMinutes"] = POST_MILLIS / 60000;
+    json["NextCheckMinutes"] = NEXT_CHECK / 60000;
 
     File configFile = SPIFFS.open("/config.json", "w");
     if (!configFile) {
@@ -281,6 +306,7 @@ void loop() {
     currentReading = getReading(fermenterSensor);
     chamberReading = getReading(chamberSensor);
     if ((long)millis() > nextCheck) {
+      Serial.println("Next Check!");
       nextCheck += NEXT_CHECK;
       temperatureChange = currentReading - lastReading;
       lastReading = currentReading;
@@ -339,6 +365,7 @@ void loop() {
     delay(100);
   }
   if ((long)(millis() - lastPostTime) >= 0) {
+    Serial.println("Posting....");
     lastPostTime += POST_MILLIS;
     postReadingData(currentReading, chamberReading, desiredTemperature, temperatureChange, tolerance);
     yield();
@@ -394,35 +421,28 @@ void turnOff() {
 }
 
 void postRestartData() {
-  postToThingSpeak(String(apiKey) + "&field6=0\r\n\r\n");
+  //  postToThingSpeak(String(apiKey) + "&field6=0\r\n\r\n");
 }
 
 void postReadingData(float fermenter, float chamber, int desired, float avgChange, float tolerance) {
-  if (fermenter < 2.0F) {
-    fermenter = getReading(fermenterSensor);
-  }
-  String postStr = apiKey;
-  postStr += "&field1=";
-  postStr += String(fermenter);
-  postStr += "&field2=";
-  postStr += String(chamber);
-  postStr += "&field3=";
-  postStr += String(desired);
-  postStr += "&field4=";
-  postStr += String(mode);
-  postStr += "&field5=";
-  postStr += String(avgChange);
-  postStr += "&field6=";
-  postStr += String(tolerance);
-  postStr += "\r\n\r\n";
-  postToThingSpeak(postStr);
+  WiFiClient client;
+  ThingSpeak.begin(client);  // Initialize ThingSpeak
+  Serial.println("About to post!");
+  ThingSpeak.setField(1, fermenter);
+  ThingSpeak.setField(2, chamber);
+  ThingSpeak.setField(3, desired);
+  ThingSpeak.setField(4, mode);
+  ThingSpeak.setField(5, avgChange);
+  ThingSpeak.setField(6, tolerance);
+  int x = ThingSpeak.writeFields(atoi(tsChannel), apiKey);
+  Serial.println(x);
 }
 
-void postToThingSpeak(String data) {
+/*void postToThingSpeak(String data) {
   WiFiClient client;
   if (client.connect(thingSpeakserver, 80)) { // "184.106.153.149" or api.thingspeak.com
 
-    client.print("POST /update HTTP/1.1\n");
+    client.print("GET /update HTTP/1.1\n");
     client.print("Host: api.thingspeak.com\n");
     client.print("Connection: close\n");
     client.print("X-THINGSPEAKAPIKEY: " + String(apiKey) + "\n");
@@ -432,7 +452,7 @@ void postToThingSpeak(String data) {
     client.print("\n\n");
     client.print(data);
   }
-}
+  }*/
 
 void readSettingsFile() {
   //  Serial.printf("read file heap size start: %u\n", ESP.getFreeHeap());
@@ -566,4 +586,3 @@ String uptimeString() {
   Serial.println(retVal);
   return retVal;
 }
-
