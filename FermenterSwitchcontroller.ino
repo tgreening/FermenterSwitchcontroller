@@ -32,7 +32,7 @@ const long READ_MILLIS = 5000UL;
 const long WAIT_MILLIS = 300000UL;
 long POST_MILLIS = 300000UL;
 long NEXT_CHECK = 120000UL;
-const char* host = "fermenterswitch_test";
+const char* host = "fermenterswitch";
 const int COOLING = 2;
 const int HEATING = 1;
 const int OFF = 0;
@@ -46,7 +46,7 @@ long unsigned lastPostTime = ((long)millis()) + POST_MILLIS;
 unsigned long nextCheck = (long)millis() + 120000UL;
 float lastReading, chamberReading;
 float temperatureChange = 0.0F;
-char apiKey[16], postMinutes[3], checkMinutes[3],tsChannel[6];
+char apiKey[16], postMinutes[3], checkMinutes[3], tsChannel[6];
 int HighMillis = 0;
 int Rollover = 0;
 bool isHeatEnabled = true;
@@ -191,7 +191,7 @@ void setup(void)
   WiFiManagerParameter custom_thingspeak_api_key("key", "API key", apiKey, 40);
   WiFiManagerParameter custom_thingspeak_post_minutes("Post Minutes", "Minutes between Thingsspeak posts", postMinutes, 5);
   WiFiManagerParameter custom_check_minutes("Check Minutes", "Check Minutes", checkMinutes, 5);
-  WiFiManagerParameter custom_thingspeak_channel("ThingSpeak Channle", "Channel Number", tsChannel, 8);
+  WiFiManagerParameter custom_thingspeak_channel("ThingSpeak Channel", "Channel Number", tsChannel, 8);
   wifiManager.setSaveConfigCallback(saveConfigCallback);
 
   //add all your parameters here
@@ -428,7 +428,11 @@ void postReadingData(float fermenter, float chamber, int desired, float avgChang
   WiFiClient client;
   ThingSpeak.begin(client);  // Initialize ThingSpeak
   Serial.println("About to post!");
-  ThingSpeak.setField(1, fermenter);
+  int postReading = fermenter;
+  if (fermenter == 0) {
+    postReading = lastReading + avgChange;
+  }
+  ThingSpeak.setField(1, postReading);
   ThingSpeak.setField(2, chamber);
   ThingSpeak.setField(3, desired);
   ThingSpeak.setField(4, mode);
