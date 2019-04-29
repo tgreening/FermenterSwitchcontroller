@@ -429,7 +429,7 @@ void postReadingData(float fermenter, float chamber, int desired, float avgChang
   ThingSpeak.begin(client);  // Initialize ThingSpeak
   Serial.println("About to post!");
   int postReading = fermenter;
-  if (fermenter == 0) {
+  if (fermenter < 5) {
     postReading = lastReading + avgChange;
   }
   ThingSpeak.setField(1, postReading);
